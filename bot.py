@@ -222,6 +222,11 @@ def display_game_name(game: Game) -> str:
     return game.channel_name.strip() if game.channel_name and game.channel_name.strip() else game.name
 
 
+def normalized_channel_base(name: str) -> str:
+    base = name.split(":", 1)[0].strip()
+    return re.sub(r"\s+", " ", base).casefold()
+
+
 def percent_change(value: int, baseline: Optional[float]) -> str:
     if baseline is None:
         return "new data"
@@ -339,6 +344,11 @@ class CCUBot(commands.Bot):
             if isinstance(channel, discord.VoiceChannel):
                 return channel
 
+        existing = self.find_existing_voice_channel(guild, game)
+        if existing:
+            self.db.update_game_channel(game.universe_id, existing.id)
+            return existing
+
         overwrites = {
             guild.default_role: discord.PermissionOverwrite(connect=False, view_channel=True),
         }
@@ -354,6 +364,14 @@ class CCUBot(commands.Bot):
 
         self.db.update_game_channel(game.universe_id, channel.id)
         return channel
+
+    def find_existing_voice_channel(self, guild: discord.Guild, game: Game) -> Optional[discord.VoiceChannel]:
+        candidates = [display_game_name(game), game.name]
+        normalized_candidates = {re.sub(r"\s+", " ", candidate).strip().casefold() for candidate in candidates if candidate}
+        for channel in guild.voice_channels:
+            if normalized_channel_base(channel.name) in normalized_candidates:
+                return channel
+        return None
 
     async def update_voice_channels(self) -> None:
         games = self.db.games()
@@ -541,7 +559,18 @@ async def track_name(interaction: discord.Interaction, game: str, name: str) -> 
         return
 
     bot.db.set_channel_name(tracked.universe_id, cleaned)
-    await bot.update_voice_channels()
+    if interaction.guild:
+        channel = interaction.guild.get_channel(tracked.channel_id) if tracked.channel_id else None
+        if not isinstance(channel, discord.VoiceChannel):
+            channel = bot.find_existing_voice_channel(interaction.guild, tracked)
+            if channel:
+                bot.db.update_game_channel(tracked.universe_id, channel.id)
+
+        if isinstance(channel, discord.VoiceChannel):
+            await channel.edit(
+                name=short_channel_name(cleaned, tracked.current_ccu),
+                reason="Updating Roblox CCU channel name",
+            )
     await interaction.response.send_message(
         f"Channel name for **{tracked.name}** set to `{cleaned}`.",
         ephemeral=True,
