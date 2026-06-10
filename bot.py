@@ -104,6 +104,15 @@ class Database:
         )
         self.conn.commit()
 
+    def stat_channel_ids(self) -> list[int]:
+        value = self.get_config("stat_channel_ids")
+        if not value:
+            return []
+        return [int(item) for item in value.split(",") if item.strip().isdigit()]
+
+    def set_stat_channel_ids(self, channel_ids: list[int]) -> None:
+        self.set_config("stat_channel_ids", ",".join(str(channel_id) for channel_id in channel_ids[:3]))
+
     def upsert_game(self, universe_id: int, place_id: Optional[int], name: str) -> None:
         now = datetime.now(timezone.utc).isoformat()
         self.conn.execute(
@@ -123,13 +132,6 @@ class Database:
         self.conn.execute(
             "UPDATE games SET channel_name = ?, updated_at = ? WHERE universe_id = ?",
             (channel_name, datetime.now(timezone.utc).isoformat(), universe_id),
-        )
-        self.conn.commit()
-
-    def update_game_channel(self, universe_id: int, channel_id: int) -> None:
-        self.conn.execute(
-            "UPDATE games SET channel_id = ?, updated_at = ? WHERE universe_id = ?",
-            (channel_id, datetime.now(timezone.utc).isoformat(), universe_id),
         )
         self.conn.commit()
 
@@ -220,11 +222,6 @@ def short_channel_name(name: str, ccu: int) -> str:
 
 def display_game_name(game: Game) -> str:
     return game.channel_name.strip() if game.channel_name and game.channel_name.strip() else game.name
-
-
-def normalized_channel_base(name: str) -> str:
-    base = name.split(":", 1)[0].strip()
-    return re.sub(r"\s+", " ", base).casefold()
 
 
 def percent_change(value: int, baseline: Optional[float]) -> str:
@@ -339,18 +336,23 @@ class CCUBot(commands.Bot):
         return results
 
     async def update_voice_channels(self) -> None:
-        games = self.db.games()
-        if not games:
+        stat_channel_ids = self.db.stat_channel_ids()
+        if not stat_channel_ids:
             return
 
         for guild in self.guilds:
-            for game in games:
-                if not game.channel_id:
-                    continue
-                channel = guild.get_channel(game.channel_id)
+            top_games = sorted(self.db.games(), key=lambda game: game.current_ccu, reverse=True)[:3]
+            for index, channel_id in enumerate(stat_channel_ids[:3]):
+                channel = guild.get_channel(channel_id)
                 if not isinstance(channel, discord.VoiceChannel):
                     continue
-                new_name = short_channel_name(display_game_name(game), game.current_ccu)
+
+                if index < len(top_games):
+                    game = top_games[index]
+                    new_name = short_channel_name(display_game_name(game), game.current_ccu)
+                else:
+                    new_name = f"CCU Slot {index + 1}: 0 CCU"
+
                 if channel.name == new_name:
                     continue
                 try:
@@ -361,43 +363,32 @@ class CCUBot(commands.Bot):
                     print(f"Could not rename {channel.name}: {exc}")
 
     async def create_stat_channels(self, guild: discord.Guild) -> int:
-        games = self.db.games()
         handled = 0
+        channel_ids = [
+            channel_id
+            for channel_id in self.db.stat_channel_ids()
+            if isinstance(guild.get_channel(channel_id), discord.VoiceChannel)
+        ]
         overwrites = {
             guild.default_role: discord.PermissionOverwrite(connect=False, view_channel=True),
         }
 
-        for game in games:
-            channel = guild.get_channel(game.channel_id) if game.channel_id else None
-            if isinstance(channel, discord.VoiceChannel):
-                continue
-
-            matched = None
-            desired_name = short_channel_name(display_game_name(game), game.current_ccu)
-            desired_base = normalized_channel_base(desired_name)
-            for existing in guild.voice_channels:
-                if normalized_channel_base(existing.name) == desired_base:
-                    matched = existing
-                    break
-
-            if isinstance(matched, discord.VoiceChannel):
-                self.db.update_game_channel(game.universe_id, matched.id)
-                handled += 1
-                continue
-
+        while len(channel_ids) < 3:
+            slot = len(channel_ids) + 1
             try:
                 channel = await guild.create_voice_channel(
-                    name=desired_name,
+                    name=f"CCU Slot {slot}: 0 CCU",
                     overwrites=overwrites,
                     reason="Creating Roblox CCU tracker channel",
                 )
             except discord.Forbidden:
                 print(f"Missing permission to create voice channel in {guild.name}")
-                continue
+                break
 
-            self.db.update_game_channel(game.universe_id, channel.id)
+            channel_ids.append(channel.id)
             handled += 1
 
+        self.db.set_stat_channel_ids(channel_ids)
         return handled
 
     async def update_presence(self) -> None:
@@ -524,15 +515,8 @@ async def track_remove(interaction: discord.Interaction, game: str) -> None:
         await interaction.response.send_message("I could not find that tracked game.", ephemeral=True)
         return
 
-    channel_id = tracked.channel_id
     bot.db.remove_game(tracked.universe_id)
-    if channel_id:
-        channel = interaction.guild.get_channel(channel_id) if interaction.guild else None
-        if isinstance(channel, discord.VoiceChannel):
-            try:
-                await channel.delete(reason="Removing Roblox CCU tracker channel")
-            except discord.HTTPException:
-                pass
+    await bot.update_voice_channels()
 
     await bot.update_presence()
     await interaction.response.send_message(f"Removed **{tracked.name}** from tracking.", ephemeral=True)
@@ -552,9 +536,9 @@ async def track_list(interaction: discord.Interaction) -> None:
     await interaction.response.send_message("\n".join(lines), ephemeral=True)
 
 
-@bot.tree.command(name="track_name", description="Set a shorter name for a game's voice channel.")
+@bot.tree.command(name="rename", description="Rename a tracked game's stat display name.")
 @app_commands.describe(game="Game name, place ID, universe ID, or Roblox URL", name="Short channel name to use")
-async def track_name(interaction: discord.Interaction, game: str, name: str) -> None:
+async def rename(interaction: discord.Interaction, game: str, name: str) -> None:
     tracked = bot.db.find_game(game)
     if not tracked:
         await interaction.response.send_message("I could not find that tracked game.", ephemeral=True)
@@ -567,15 +551,7 @@ async def track_name(interaction: discord.Interaction, game: str, name: str) -> 
 
     bot.db.set_channel_name(tracked.universe_id, cleaned)
 
-    channel = None
-    if interaction.guild and tracked.channel_id:
-        channel = interaction.guild.get_channel(tracked.channel_id)
-
-    if isinstance(channel, discord.VoiceChannel):
-        await channel.edit(
-            name=short_channel_name(cleaned, tracked.current_ccu),
-            reason="Updating Roblox CCU channel name",
-        )
+    await bot.update_voice_channels()
 
     await interaction.response.send_message(
         f"Channel name for **{tracked.name}** set to `{cleaned}`.",
@@ -583,15 +559,16 @@ async def track_name(interaction: discord.Interaction, game: str, name: str) -> 
     )
 
 
-@track_name.autocomplete("game")
-async def track_name_game_autocomplete(interaction: discord.Interaction, current: str):
+@rename.autocomplete("game")
+async def rename_game_autocomplete(interaction: discord.Interaction, current: str):
     tracked_games = bot.db.games()
     current_lower = current.lower()
     choices = []
 
     for game in tracked_games:
         label = display_game_name(game)
-        if current_lower and current_lower not in label.lower():
+        searchable = f"{label} {game.name}".lower()
+        if current_lower and current_lower not in searchable:
             continue
         choices.append(app_commands.Choice(name=label, value=str(game.universe_id)))
         if len(choices) >= 25:
@@ -610,6 +587,21 @@ async def stat(interaction: discord.Interaction) -> None:
     created = await bot.create_stat_channels(interaction.guild)
     await bot.update_voice_channels()
     await interaction.followup.send(f"Ready. Created or linked `{created}` voice channel(s).", ephemeral=True)
+
+
+@bot.tree.command(name="ccu", description="Show the current CCU for every tracked game.")
+async def ccu(interaction: discord.Interaction) -> None:
+    games = sorted(bot.db.games(), key=lambda game: game.current_ccu, reverse=True)
+    if not games:
+        await interaction.response.send_message("No games are being tracked yet.", ephemeral=True)
+        return
+
+    total = sum(game.current_ccu for game in games)
+    lines = [f"**Current CCU** - Total: `{total:,}`", ""]
+    for index, game in enumerate(games, start=1):
+        lines.append(f"`#{index}` **{display_game_name(game)}**: `{game.current_ccu:,}`")
+
+    await interaction.response.send_message("\n".join(lines), ephemeral=True)
 
 
 @bot.tree.command(name="track_refresh", description="Refresh CCU counts and voice channel names now.")

@@ -1,6 +1,6 @@
 # Roblox CCU Discord Bot
 
-Tracks Roblox concurrent users and shows each game in an auto-created Discord voice channel. The bot status shows total CCU, and a daily report is sent at 06:00 Europe/Bratislava.
+Tracks Roblox concurrent users and shows the current top 3 games in Discord voice channels created with `/stat`. The bot status shows total CCU, and a daily report is sent at 06:00 Europe/Bratislava.
 
 ## Railway environment variables
 
@@ -30,6 +30,9 @@ Invite the bot with these permissions:
 - `/track_add game:<roblox url, place id, or universe id>`
 - `/track_remove game:<name, url, place id, or universe id>`
 - `/track_list`
+- `/rename game:<tracked game> name:<short display name>`
+- `/stat`
+- `/ccu`
 - `/track_refresh`
 - `/config_set_report_channel channel:<text channel>`
 - `/report_now`
