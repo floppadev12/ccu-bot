@@ -335,11 +335,12 @@ class CCUBot(commands.Bot):
                 results[int(item["id"])] = item
         return results
 
-    async def update_voice_channels(self) -> None:
+    async def update_voice_channels(self) -> int:
         stat_channel_ids = self.db.stat_channel_ids()
         if not stat_channel_ids:
-            return
+            return 0
 
+        updated = 0
         for guild in self.guilds:
             top_games = sorted(self.db.games(), key=lambda game: game.current_ccu, reverse=True)[:3]
             for index, channel_id in enumerate(stat_channel_ids[:3]):
@@ -357,10 +358,12 @@ class CCUBot(commands.Bot):
                     continue
                 try:
                     await channel.edit(name=new_name, reason="Updating Roblox CCU")
+                    updated += 1
                 except discord.Forbidden:
                     print(f"Missing permission to rename {channel.name} in {guild.name}")
                 except discord.HTTPException as exc:
                     print(f"Could not rename {channel.name}: {exc}")
+        return updated
 
     async def create_stat_channels(self, guild: discord.Guild) -> int:
         handled = 0
@@ -539,22 +542,35 @@ async def track_list(interaction: discord.Interaction) -> None:
 @bot.tree.command(name="rename", description="Rename a tracked game's stat display name.")
 @app_commands.describe(game="Game name, place ID, universe ID, or Roblox URL", name="Short channel name to use")
 async def rename(interaction: discord.Interaction, game: str, name: str) -> None:
+    await interaction.response.defer(ephemeral=True)
+
     tracked = bot.db.find_game(game)
     if not tracked:
-        await interaction.response.send_message("I could not find that tracked game.", ephemeral=True)
+        await interaction.followup.send("I could not find that tracked game.", ephemeral=True)
         return
 
     cleaned = re.sub(r"\s+", " ", name).strip()
     if not cleaned:
-        await interaction.response.send_message("Channel name cannot be empty.", ephemeral=True)
+        await interaction.followup.send("Channel name cannot be empty.", ephemeral=True)
         return
 
     bot.db.set_channel_name(tracked.universe_id, cleaned)
 
-    await bot.update_voice_channels()
+    top_games = sorted(bot.db.games(), key=lambda item: item.current_ccu, reverse=True)[:3]
+    is_visible = any(item.universe_id == tracked.universe_id for item in top_games)
+    updated = await bot.update_voice_channels()
 
-    await interaction.response.send_message(
-        f"Channel name for **{tracked.name}** set to `{cleaned}`.",
+    if not bot.db.stat_channel_ids():
+        detail = "Run `/stat` first to create the 3 CCU voice channels."
+    elif is_visible:
+        detail = "It is currently in the top 3, so the voice channel was refreshed."
+        if updated == 0:
+            detail += " If Discord did not visually change yet, it may be channel rename rate limiting."
+    else:
+        detail = "It is not currently in the top 3, so no voice channel is showing it right now."
+
+    await interaction.followup.send(
+        f"Display name for **{tracked.name}** set to `{cleaned}`.\n{detail}",
         ephemeral=True,
     )
 
