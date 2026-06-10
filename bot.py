@@ -37,6 +37,7 @@ class Game:
     universe_id: int
     place_id: Optional[int]
     name: str
+    channel_name: Optional[str]
     channel_id: Optional[int]
     current_ccu: int
 
@@ -62,6 +63,7 @@ class Database:
                 universe_id INTEGER PRIMARY KEY,
                 place_id INTEGER,
                 name TEXT NOT NULL,
+                channel_name TEXT,
                 channel_id INTEGER,
                 current_ccu INTEGER NOT NULL DEFAULT 0,
                 created_at TEXT NOT NULL,
@@ -80,6 +82,12 @@ class Database:
                 ON samples(universe_id, sampled_at);
             """
         )
+        columns = {
+            row["name"]
+            for row in self.conn.execute("PRAGMA table_info(games)").fetchall()
+        }
+        if "channel_name" not in columns:
+            self.conn.execute("ALTER TABLE games ADD COLUMN channel_name TEXT")
         self.conn.commit()
 
     def get_config(self, key: str) -> Optional[str]:
@@ -111,6 +119,13 @@ class Database:
         )
         self.conn.commit()
 
+    def set_channel_name(self, universe_id: int, channel_name: Optional[str]) -> None:
+        self.conn.execute(
+            "UPDATE games SET channel_name = ?, updated_at = ? WHERE universe_id = ?",
+            (channel_name, datetime.now(timezone.utc).isoformat(), universe_id),
+        )
+        self.conn.commit()
+
     def update_game_channel(self, universe_id: int, channel_id: int) -> None:
         self.conn.execute(
             "UPDATE games SET channel_id = ?, updated_at = ? WHERE universe_id = ?",
@@ -137,7 +152,7 @@ class Database:
     def games(self) -> list[Game]:
         rows = self.conn.execute(
             """
-            SELECT universe_id, place_id, name, channel_id, current_ccu
+            SELECT universe_id, place_id, name, channel_name, channel_id, current_ccu
             FROM games
             ORDER BY name COLLATE NOCASE
             """
@@ -147,6 +162,7 @@ class Database:
                 universe_id=row["universe_id"],
                 place_id=row["place_id"],
                 name=row["name"],
+                channel_name=row["channel_name"],
                 channel_id=row["channel_id"],
                 current_ccu=row["current_ccu"],
             )
@@ -200,6 +216,10 @@ def short_channel_name(name: str, ccu: int) -> str:
     if len(clean) > max_name_len:
         clean = clean[: max_name_len - 1].rstrip() + "..."
     return f"{clean}: {ccu:,} CCU"
+
+
+def display_game_name(game: Game) -> str:
+    return game.channel_name.strip() if game.channel_name and game.channel_name.strip() else game.name
 
 
 def percent_change(value: int, baseline: Optional[float]) -> str:
@@ -324,7 +344,7 @@ class CCUBot(commands.Bot):
         }
         try:
             channel = await guild.create_voice_channel(
-                name=short_channel_name(game.name, game.current_ccu),
+                name=short_channel_name(display_game_name(game), game.current_ccu),
                 overwrites=overwrites,
                 reason="Creating Roblox CCU tracker channel",
             )
@@ -345,7 +365,7 @@ class CCUBot(commands.Bot):
                 channel = await self.ensure_voice_channel(guild, game)
                 if not channel:
                     continue
-                new_name = short_channel_name(game.name, game.current_ccu)
+                new_name = short_channel_name(display_game_name(game), game.current_ccu)
                 if channel.name == new_name:
                     continue
                 try:
@@ -505,6 +525,27 @@ async def track_list(interaction: discord.Interaction) -> None:
         for game in games
     ]
     await interaction.response.send_message("\n".join(lines), ephemeral=True)
+
+
+@bot.tree.command(name="track_name", description="Set a shorter name for a game's voice channel.")
+@app_commands.describe(game="Game name, place ID, universe ID, or Roblox URL", name="Short channel name to use")
+async def track_name(interaction: discord.Interaction, game: str, name: str) -> None:
+    tracked = bot.db.find_game(game)
+    if not tracked:
+        await interaction.response.send_message("I could not find that tracked game.", ephemeral=True)
+        return
+
+    cleaned = re.sub(r"\s+", " ", name).strip()
+    if not cleaned:
+        await interaction.response.send_message("Channel name cannot be empty.", ephemeral=True)
+        return
+
+    bot.db.set_channel_name(tracked.universe_id, cleaned)
+    await bot.update_voice_channels()
+    await interaction.response.send_message(
+        f"Channel name for **{tracked.name}** set to `{cleaned}`.",
+        ephemeral=True,
+    )
 
 
 @bot.tree.command(name="track_refresh", description="Refresh CCU counts and voice channel names now.")
