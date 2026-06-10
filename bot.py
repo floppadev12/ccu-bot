@@ -338,41 +338,6 @@ class CCUBot(commands.Bot):
                 results[int(item["id"])] = item
         return results
 
-    async def ensure_voice_channel(self, guild: discord.Guild, game: Game) -> Optional[discord.VoiceChannel]:
-        if game.channel_id:
-            channel = guild.get_channel(game.channel_id)
-            if isinstance(channel, discord.VoiceChannel):
-                return channel
-
-        existing = self.find_existing_voice_channel(guild, game)
-        if existing:
-            self.db.update_game_channel(game.universe_id, existing.id)
-            return existing
-
-        overwrites = {
-            guild.default_role: discord.PermissionOverwrite(connect=False, view_channel=True),
-        }
-        try:
-            channel = await guild.create_voice_channel(
-                name=short_channel_name(display_game_name(game), game.current_ccu),
-                overwrites=overwrites,
-                reason="Creating Roblox CCU tracker channel",
-            )
-        except discord.Forbidden:
-            print(f"Missing permission to create voice channel in {guild.name}")
-            return None
-
-        self.db.update_game_channel(game.universe_id, channel.id)
-        return channel
-
-    def find_existing_voice_channel(self, guild: discord.Guild, game: Game) -> Optional[discord.VoiceChannel]:
-        candidates = [display_game_name(game), game.name]
-        normalized_candidates = {re.sub(r"\s+", " ", candidate).strip().casefold() for candidate in candidates if candidate}
-        for channel in guild.voice_channels:
-            if normalized_channel_base(channel.name) in normalized_candidates:
-                return channel
-        return None
-
     async def update_voice_channels(self) -> None:
         games = self.db.games()
         if not games:
@@ -380,8 +345,10 @@ class CCUBot(commands.Bot):
 
         for guild in self.guilds:
             for game in games:
-                channel = await self.ensure_voice_channel(guild, game)
-                if not channel:
+                if not game.channel_id:
+                    continue
+                channel = guild.get_channel(game.channel_id)
+                if not isinstance(channel, discord.VoiceChannel):
                     continue
                 new_name = short_channel_name(display_game_name(game), game.current_ccu)
                 if channel.name == new_name:
@@ -392,6 +359,46 @@ class CCUBot(commands.Bot):
                     print(f"Missing permission to rename {channel.name} in {guild.name}")
                 except discord.HTTPException as exc:
                     print(f"Could not rename {channel.name}: {exc}")
+
+    async def create_stat_channels(self, guild: discord.Guild) -> int:
+        games = self.db.games()
+        handled = 0
+        overwrites = {
+            guild.default_role: discord.PermissionOverwrite(connect=False, view_channel=True),
+        }
+
+        for game in games:
+            channel = guild.get_channel(game.channel_id) if game.channel_id else None
+            if isinstance(channel, discord.VoiceChannel):
+                continue
+
+            matched = None
+            desired_name = short_channel_name(display_game_name(game), game.current_ccu)
+            desired_base = normalized_channel_base(desired_name)
+            for existing in guild.voice_channels:
+                if normalized_channel_base(existing.name) == desired_base:
+                    matched = existing
+                    break
+
+            if isinstance(matched, discord.VoiceChannel):
+                self.db.update_game_channel(game.universe_id, matched.id)
+                handled += 1
+                continue
+
+            try:
+                channel = await guild.create_voice_channel(
+                    name=desired_name,
+                    overwrites=overwrites,
+                    reason="Creating Roblox CCU tracker channel",
+                )
+            except discord.Forbidden:
+                print(f"Missing permission to create voice channel in {guild.name}")
+                continue
+
+            self.db.update_game_channel(game.universe_id, channel.id)
+            handled += 1
+
+        return handled
 
     async def update_presence(self) -> None:
         total = sum(game.current_ccu for game in self.db.games())
@@ -575,6 +582,18 @@ async def track_name(interaction: discord.Interaction, game: str, name: str) -> 
         f"Channel name for **{tracked.name}** set to `{cleaned}`.",
         ephemeral=True,
     )
+
+
+@bot.tree.command(name="stat", description="Create the tracked voice channels for the current server.")
+async def stat(interaction: discord.Interaction) -> None:
+    if not interaction.guild:
+        await interaction.response.send_message("This command can only be used in a server.", ephemeral=True)
+        return
+
+    await interaction.response.defer(ephemeral=True)
+    created = await bot.create_stat_channels(interaction.guild)
+    await bot.update_voice_channels()
+    await interaction.followup.send(f"Ready. Created or linked `{created}` voice channel(s).", ephemeral=True)
 
 
 @bot.tree.command(name="track_refresh", description="Refresh CCU counts and voice channel names now.")
