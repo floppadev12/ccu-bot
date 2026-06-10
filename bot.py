@@ -394,6 +394,25 @@ class CCUBot(commands.Bot):
         self.db.set_stat_channel_ids(channel_ids)
         return handled
 
+    async def reset_stat_channels(self, guild: discord.Guild) -> tuple[int, int]:
+        deleted = 0
+        for channel_id in self.db.stat_channel_ids():
+            channel = guild.get_channel(channel_id)
+            if not isinstance(channel, discord.VoiceChannel):
+                continue
+            try:
+                await channel.delete(reason="Resetting Roblox CCU stat channels")
+                deleted += 1
+            except discord.Forbidden:
+                print(f"Missing permission to delete {channel.name} in {guild.name}")
+            except discord.HTTPException as exc:
+                print(f"Could not delete {channel.name}: {exc}")
+
+        self.db.set_stat_channel_ids([])
+        created = await self.create_stat_channels(guild)
+        await self.update_voice_channels()
+        return deleted, created
+
     async def update_presence(self) -> None:
         total = sum(game.current_ccu for game in self.db.games())
         await self.change_presence(activity=discord.Activity(type=discord.ActivityType.watching, name=f"Total CCU: {total:,}"))
@@ -593,16 +612,18 @@ async def rename_game_autocomplete(interaction: discord.Interaction, current: st
     return choices
 
 
-@bot.tree.command(name="stat", description="Create the tracked voice channels for the current server.")
+@bot.tree.command(name="stat", description="Reset and create the 3 top-CCU voice channels.")
 async def stat(interaction: discord.Interaction) -> None:
     if not interaction.guild:
         await interaction.response.send_message("This command can only be used in a server.", ephemeral=True)
         return
 
     await interaction.response.defer(ephemeral=True)
-    created = await bot.create_stat_channels(interaction.guild)
-    await bot.update_voice_channels()
-    await interaction.followup.send(f"Ready. Created or linked `{created}` voice channel(s).", ephemeral=True)
+    deleted, created = await bot.reset_stat_channels(interaction.guild)
+    await interaction.followup.send(
+        f"Ready. Deleted `{deleted}` old stat channel(s) and created `{created}` new one(s).",
+        ephemeral=True,
+    )
 
 
 @bot.tree.command(name="ccu", description="Show the current CCU for every tracked game.")
