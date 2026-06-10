@@ -566,22 +566,38 @@ async def track_name(interaction: discord.Interaction, game: str, name: str) -> 
         return
 
     bot.db.set_channel_name(tracked.universe_id, cleaned)
-    if interaction.guild:
-        channel = interaction.guild.get_channel(tracked.channel_id) if tracked.channel_id else None
-        if not isinstance(channel, discord.VoiceChannel):
-            channel = bot.find_existing_voice_channel(interaction.guild, tracked)
-            if channel:
-                bot.db.update_game_channel(tracked.universe_id, channel.id)
 
-        if isinstance(channel, discord.VoiceChannel):
-            await channel.edit(
-                name=short_channel_name(cleaned, tracked.current_ccu),
-                reason="Updating Roblox CCU channel name",
-            )
+    channel = None
+    if interaction.guild and tracked.channel_id:
+        channel = interaction.guild.get_channel(tracked.channel_id)
+
+    if isinstance(channel, discord.VoiceChannel):
+        await channel.edit(
+            name=short_channel_name(cleaned, tracked.current_ccu),
+            reason="Updating Roblox CCU channel name",
+        )
+
     await interaction.response.send_message(
         f"Channel name for **{tracked.name}** set to `{cleaned}`.",
         ephemeral=True,
     )
+
+
+@track_name.autocomplete("game")
+async def track_name_game_autocomplete(interaction: discord.Interaction, current: str):
+    tracked_games = bot.db.games()
+    current_lower = current.lower()
+    choices = []
+
+    for game in tracked_games:
+        label = display_game_name(game)
+        if current_lower and current_lower not in label.lower():
+            continue
+        choices.append(app_commands.Choice(name=label, value=str(game.universe_id)))
+        if len(choices) >= 25:
+            break
+
+    return choices
 
 
 @bot.tree.command(name="stat", description="Create the tracked voice channels for the current server.")
