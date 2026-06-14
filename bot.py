@@ -208,6 +208,20 @@ class Database:
                 peaks.append(peak)
         return sum(peaks) / len(peaks) if peaks else None
 
+    def has_samples_for_day(self, local_day: date) -> bool:
+        start = datetime.combine(local_day, time.min, tzinfo=tz).astimezone(timezone.utc).isoformat()
+        end = datetime.combine(local_day + timedelta(days=1), time.min, tzinfo=tz).astimezone(timezone.utc).isoformat()
+        row = self.conn.execute(
+            """
+            SELECT 1
+            FROM samples
+            WHERE sampled_at >= ? AND sampled_at < ?
+            LIMIT 1
+            """,
+            (start, end),
+        ).fetchone()
+        return row is not None
+
 
 def extract_first_number(value: str) -> Optional[int]:
     match = re.search(r"\d+", value)
@@ -438,7 +452,10 @@ class CCUBot(commands.Bot):
         total = sum(game.current_ccu for game in self.db.games())
         await self.change_presence(activity=discord.Activity(type=discord.ActivityType.watching, name=f"Total CCU: {total:,}"))
 
-    def build_report(self, report_day: date) -> str:
+    def build_report(self, report_day: date) -> Optional[str]:
+        if not self.db.has_samples_for_day(report_day):
+            return None
+
         previous_window_start = report_day - timedelta(days=7)
         lines = [
             f"**Daily CCU Report - {report_day.isoformat()}**",
@@ -453,15 +470,16 @@ class CCUBot(commands.Bot):
 
         for game in self.db.games():
             peak = self.db.peak_for_day(game.universe_id, report_day)
-            if peak is None:
-                peak = 0
             baseline = self.db.average_peak(game.universe_id, previous_window_start, 7)
             baseline_text = f"{baseline:.1f}" if baseline is not None else "0.0"
             lines.append(f"**{game.name}**")
-            lines.append(f"Peak CCU: `{peak:,}` | 7-day avg peak: `{baseline_text}` | Change: {formatted_change(peak, baseline)}")
+            if peak is None:
+                lines.append(f"Peak CCU: `No samples` | 7-day avg peak: `{baseline_text}` | Change: `new data`")
+            else:
+                lines.append(f"Peak CCU: `{peak:,}` | 7-day avg peak: `{baseline_text}` | Change: {formatted_change(peak, baseline)}")
             lines.append("")
 
-            total_peak += peak
+            total_peak += peak or 0
             if baseline is not None:
                 total_baseline += baseline
                 total_baseline_games += 1
@@ -484,7 +502,12 @@ class CCUBot(commands.Bot):
         if not isinstance(channel, discord.TextChannel):
             return False
 
-        await channel.send(self.build_report(report_day))
+        report = self.build_report(report_day)
+        if not report:
+            print(f"Daily CCU report skipped for {report_day.isoformat()}: no samples found.")
+            return False
+
+        await channel.send(report)
         return True
 
     @tasks.loop(seconds=POLL_SECONDS)
@@ -680,6 +703,12 @@ async def report_now(interaction: discord.Interaction) -> None:
     await interaction.response.defer(ephemeral=True)
     report_day = datetime.now(tz).date() - timedelta(days=1)
     message = bot.build_report(report_day)
+    if not message:
+        await interaction.followup.send(
+            f"No CCU samples were found for {report_day.isoformat()}, so no report was sent.",
+            ephemeral=True,
+        )
+        return
 
     channel_id = bot.db.get_config("report_channel_id")
     target = bot.get_channel(int(channel_id)) if channel_id else interaction.channel
