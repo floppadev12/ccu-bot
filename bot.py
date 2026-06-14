@@ -18,6 +18,8 @@ TIMEZONE_NAME = os.getenv("TIMEZONE", "Europe/Bratislava")
 POLL_SECONDS = int(os.getenv("POLL_SECONDS", "120"))
 REPORT_HOUR = int(os.getenv("REPORT_HOUR", "6"))
 REPORT_MINUTE = int(os.getenv("REPORT_MINUTE", "0"))
+GREEN_CIRCLE_EMOJI = "\N{LARGE GREEN CIRCLE}"
+RED_CIRCLE_EMOJI = "\N{LARGE RED CIRCLE}"
 
 ROBLOX_GAMES_URL = "https://games.roblox.com/v1/games"
 ROBLOX_PLACE_UNIVERSE_URL = "https://apis.roblox.com/universes/v1/places/{place_id}/universe"
@@ -233,6 +235,25 @@ def percent_change(value: int, baseline: Optional[float]) -> str:
     return f"{change:+.1f}%"
 
 
+def change_emoji(value: int, baseline: Optional[float]) -> str:
+    if baseline is None:
+        return ""
+    if baseline == 0:
+        return GREEN_CIRCLE_EMOJI if value > 0 else ""
+    change = ((value - baseline) / baseline) * 100
+    if change > 0:
+        return GREEN_CIRCLE_EMOJI
+    if change < 0:
+        return RED_CIRCLE_EMOJI
+    return ""
+
+
+def formatted_change(value: int, baseline: Optional[float]) -> str:
+    change = percent_change(value, baseline)
+    emoji = change_emoji(value, baseline)
+    return f"`{change}` {emoji}" if emoji else f"`{change}`"
+
+
 class CCUBot(commands.Bot):
     def __init__(self) -> None:
         intents = discord.Intents.default()
@@ -435,10 +456,9 @@ class CCUBot(commands.Bot):
             if peak is None:
                 peak = 0
             baseline = self.db.average_peak(game.universe_id, previous_window_start, 7)
-            change = percent_change(peak, baseline)
             baseline_text = f"{baseline:.1f}" if baseline is not None else "0.0"
             lines.append(f"**{game.name}**")
-            lines.append(f"Peak CCU: `{peak:,}` | 7-day avg peak: `{baseline_text}` | Change: `{change}`")
+            lines.append(f"Peak CCU: `{peak:,}` | 7-day avg peak: `{baseline_text}` | Change: {formatted_change(peak, baseline)}")
             lines.append("")
 
             total_peak += peak
@@ -451,7 +471,7 @@ class CCUBot(commands.Bot):
         lines.append("**Total**")
         lines.append(
             f"Peak CCU: `{total_peak:,}` | 7-day avg peak: `{total_baseline_text}` | "
-            f"Change: `{percent_change(total_peak, total_baseline_value)}`"
+            f"Change: {formatted_change(total_peak, total_baseline_value)}"
         )
         return "\n".join(lines)
 
